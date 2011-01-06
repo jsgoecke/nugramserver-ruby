@@ -38,6 +38,10 @@ class GrammarServer
     GrammarServerSession.new(self, username, password)
   end
   
+  def session(username, password, sessionid)
+    GrammarServerSession.new(self, username, password, sessionid)
+  end
+  
 end
 
 ## This class represents a session with NuGram Hosted Server.
@@ -46,11 +50,15 @@ class GrammarServerSession
 
   attr_reader :server, :username, :password
 
-  def initialize(server, username, password)
+  def initialize(server, username, password, sessionid = nil)
     @server = server
     @username = username
     @password = password
-    @sessionid = self.connect
+    @sessionid = if sessionid == nil then
+                   self.connect
+                 else
+                   sessionid
+                 end
   end
   
   ## Returns the session ID

@@ -2,7 +2,7 @@
 #
 # This code relies on the 'json' Ruby gem.
 #
-# Copyright (C) 2009, 2010 Nu Echo Inc.
+# Copyright (C) 2009,2010,2011 Nu Echo Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -14,11 +14,12 @@
 require 'rubygems' 
 require 'json'
 require 'net/http'
+require 'net/https'
 require 'uri'
 
 
 DEFAULT_SERVER_HOST = "www.grammarserver.com"
-DEFAULT_SERVER_PORT = 8082
+DEFAULT_SERVER_PORT = 443
 
 ## An object of this class acts as a proxy to NuGram Hosted Server.
 class GrammarServer
@@ -31,7 +32,7 @@ class GrammarServer
   end
   
   def get_url
-    "http://#{@host}:#{@port}"
+    "https://#{@host}:#{@port}"
   end
   
   def create_session(username, password)
@@ -41,7 +42,7 @@ class GrammarServer
   def session(username, password, sessionid)
     GrammarServerSession.new(self, username, password, sessionid)
   end
-  
+
 end
 
 ## This class represents a session with NuGram Hosted Server.
@@ -65,46 +66,53 @@ class GrammarServerSession
   def get_id
     @sessionid
   end
+
+  def basic_auth
+    'Basic ' + ["#{@username}:#{@password}"].pack('m').delete("\r\n")
+  end
+  private :basic_auth
+
+  def create_http 
+    http = Net::HTTP.new(@server.host, @server.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    headers = {
+      'Authorization' => basic_auth()
+    }
+    [http, headers]
+  end
   
   def connect
-    Net::HTTP.start(@server.host, @server.port) {|http|
-      req = Net::HTTP::Post.new('/session')
-      req.body= "responseFormat=json"
-      req.basic_auth @username, @password
-      response = http.request(req)
-      case response
-        when Net::HTTPSuccess then
-           result = JSON.parse(response.body)
-           result['session']['id']
-        else
-          response.error!
-        end
-    }
+    http, headers = create_http
+    response, data = http.post('/api/session', "responseFormat=json", headers)
+
+    case response
+    when Net::HTTPSuccess then
+      result = JSON.parse(response.body)
+      result['session']['id']
+    else
+      response.error!
+    end
   end
   
   ## Terminates the session with NuGram Hosted Server
   def disconnect
-    Net::HTTP.start(@server.host, @server.port) {|http|
-      req = Net::HTTP::Delete.new("/session/#{@sessionid}")
-      req.basic_auth @username, @password
-      response = http.request(req)
-    }
+    http, headers = create_http
+    http.delete("/api/session/#{@sessionid}", headers)
   end
   
   ## This method uploads a source grammar to NuGram Hosted Server.
   def upload(grammarPath, content)
-    Net::HTTP.start(@server.host, @server.port) {|http|
-      req = Net::HTTP::Put.new("/grammar/#{grammarPath}")
-      req.body= content
-      req.basic_auth @username, @password
-      response = http.request(req)
-      case response
-        when Net::HTTPSuccess then
-          true
-        else
-          response.error!
-        end
-    }    
+    http, headers = create_http
+    
+    response = http.request_put("/api/grammar/#{grammarPath}", content, headers)
+    case response
+    when Net::HTTPSuccess then
+      true
+    else
+      response.error!
+    end
   end
   
   ## This method requests NuGram Hosted Server to load a static grammar.
@@ -113,25 +121,19 @@ class GrammarServerSession
   end
 
   ## This method instantiates a dynamic grammar and loads it.
-  ## The 'context' argument is expected to be a hash (dictionary) that
-  ## maps strings to values. Each value must be convertible to standard JSON.
-  ## Each key in the context must correspond to the name of a variable in the
-  ## ABNF template.
   def instantiate(grammarPath, context)
-    Net::HTTP.start(@server.host, @server.port) {|http|
-      req = Net::HTTP::Post.new("/grammar/#{@sessionid}/#{grammarPath}")
-      body = URI.escape(context.to_json)
-      req.body= "responseFormat=json&context=#{context.to_json}"
-      req.basic_auth @username, @password
-      response = http.request(req)
-      case response
-        when Net::HTTPSuccess then
-           result = JSON.parse(response.body)
-           InstantiatedGrammar.new(self, result['grammar'])
-        else
-          response.error!
-        end
-    }    
+    http, headers = create_http
+
+    response = http.request_post("/api/grammar/#{@sessionid}/#{grammarPath}",
+                                 "responseFormat=json&context=#{context.to_json}",
+                                 headers)
+    case response
+    when Net::HTTPSuccess then
+      result = JSON.parse(response.body)
+      InstantiatedGrammar.new(self, result['grammar'])
+    else
+      response.error!
+    end
   end
   
 end
@@ -155,16 +157,16 @@ class InstantiatedGrammar
   ## Retrieves the source representation of the grammar in the 
   ## requested format ('abnf', 'grxml', or 'gsl')
   def get_content (extension = 'abnf')
+    http, headers = @session.create_http
+    
     url = URI.parse(self.get_url(extension))
-    Net::HTTP.start(url.host, url.port) {|http|
-      req = Net::HTTP::Get.new(url.path)
-      response = http.request(req)
+    http.request_get(url.path, headers) {|response|
       case response
-        when Net::HTTPSuccess then
-           response.body
-        else
-          response.error!
-        end
+      when Net::HTTPSuccess then
+        response.body
+      else
+        response.error!
+      end
     }
   end
 
@@ -172,21 +174,19 @@ class InstantiatedGrammar
   ## (which must a string). Returns a Python object of 'False' if
   ## the sentence cannot be parsed by the grammar.
   def interpret(sentence)
+    http, headers = @session.create_http
+
     url = URI.parse(@data['interpreterUrl'])
     sentence = URI.escape(sentence)
-    Net::HTTP.start(url.host, url.port) {|http|
-      req = Net::HTTP::Post.new(url.path)
-      req.body= "responseFormat=json&sentence=#{sentence}"
-      req.basic_auth @session.username, @session.password
-      response = http.request(req)
+
+    http.request_post(url.path, "responseFormat=json&sentence=#{sentence}", headers) {|response|
       case response
-        when Net::HTTPSuccess then
-           JSON.parse(response.body)['interpretation']
-        else
-          response.error!
-        end
-    }        
+      when Net::HTTPSuccess then
+        return JSON.parse(response.body)['interpretation']
+      else
+        response.error!
+      end
+    }
   end
 
 end
-
